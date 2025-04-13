@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import torch
-from diffusers import StableDiffusionImg2ImgPipeline, DDIMScheduler, LoraLoaderMixin
+from diffusers import StableDiffusionImg2ImgPipeline, DDIMScheduler
 from safetensors.torch import load_file
 from insightface.app import FaceAnalysis
 from insightface.model_zoo import get_model
@@ -69,29 +69,39 @@ def get_sd_pipeline():
         
         # Apply LoRA weights using path to model
         try:
-            # First approach: load from local path
             print(f"[INFO] Loading ACE_Plus LoRA from {ACE_LORA_PATH}")
-            from diffusers.models.attention_processor import LoRAAttnProcessor
             
-            # Create a new folder for the LoRA model if it doesn't exist
-            lora_dir = os.path.dirname(ACE_LORA_PATH)
-            
-            # Instead of direct loading, register the adapter and set it as active
-            sd_pipeline.load_lora_weights(lora_dir, weight_name=os.path.basename(ACE_LORA_PATH))
-            sd_pipeline.set_adapters(["default"], adapter_weights=[1.0])
+            # First try the standard approach of loading LoRA weights
+            try:
+                # Create adapter folder structure if needed
+                lora_dir = os.path.dirname(ACE_LORA_PATH)
+                adapter_name = "ace_portrait"
+                
+                # Load the LoRA weights (method depends on diffusers version)
+                sd_pipeline.load_lora_weights(
+                    lora_dir,
+                    weight_name=os.path.basename(ACE_LORA_PATH)
+                )
+                print("[INFO] Successfully loaded ACE_Plus LoRA weights")
+            except AttributeError as att_err:
+                print(f"[WARN] Standard load_lora_weights approach failed: {att_err}")
+                
+                # Alternative: Try loading from state dict directly
+                print("[INFO] Trying alternative approach with state_dict...")
+                lora_state_dict = load_file(ACE_LORA_PATH)
+                
+                # Directly apply weights if method exists
+                try:
+                    # This will work on older diffusers versions
+                    sd_pipeline.unet.load_attn_procs(lora_state_dict)
+                    print("[INFO] Applied LoRA weights using unet.load_attn_procs method")
+                except Exception as e:
+                    print(f"[ERROR] Failed to load LoRA weights: {e}")
+                    print("[WARN] Will attempt to run without LoRA weights")
             
         except Exception as e:
             print(f"[WARN] Failed to load LoRA weights from file: {e}")
-            print("[INFO] Trying to load from Hugging Face model ID...")
-            
-            try:
-                # Alternative approach: load from Hugging Face model ID
-                print("[INFO] Loading ACE_Plus LoRA from Hugging Face...")
-                sd_pipeline.load_lora_weights("ali-vilab/ACE_Plus", weight_name="portrait/comfyui_portrait_lora64.safetensors")
-                sd_pipeline.set_adapters(["default"], adapter_weights=[1.0])
-            except Exception as e2:
-                print(f"[ERROR] Failed to load LoRA weights from Hugging Face: {e2}")
-                return None
+            print("[WARN] Will attempt to run without LoRA weights")
         
         # Move to GPU if available
         if torch.cuda.is_available():
@@ -259,15 +269,40 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
     print("[INFO] Running ACE_Plus portrait enhancement...")
     try:
         with torch.inference_mode():
-            result = pipeline(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                image=input_pil,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                strength=lora_strength,
-            ).images[0]
+            try:
+                print("[INFO] Using pipeline parameters: guidance_scale={}, steps={}, strength={}".format(
+                    guidance_scale, num_inference_steps, lora_strength
+                ))
+                
+                # Try the standard API call first
+                result = pipeline(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    image=input_pil,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    strength=lora_strength,
+                ).images[0]
+                
+            except TypeError as type_err:
+                # Check if there's a specific parameter issue
+                print(f"[WARN] Parameter error in pipeline call: {type_err}")
+                print("[INFO] Trying alternative parameter set...")
+                
+                if "got an unexpected keyword argument 'strength'" in str(type_err):
+                    # Try without strength parameter (some versions don't use it)
+                    result = pipeline(
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        image=input_pil,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        generator=generator,
+                    ).images[0]
+                else:
+                    # Let the error propagate to outer try/catch
+                    raise
         
         # Save intermediate result
         result.save(os.path.join(debug_dir, "3_ace_enhanced.png"))
@@ -277,6 +312,17 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
     except Exception as e:
         print(f"[ERROR] ACE_Plus enhancement failed: {e}")
         print("[INFO] Falling back to the initial face swap result")
+        
+        # Print diffusers and CUDA details for diagnostics
+        try:
+            print(f"[DEBUG] Diffusers version: {pkg_resources.get_distribution('diffusers').version}")
+            print(f"[DEBUG] CUDA available: {torch.cuda.is_available()}")
+            if torch.cuda.is_available():
+                print(f"[DEBUG] CUDA device: {torch.cuda.get_device_name()}")
+                print(f"[DEBUG] CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        except:
+            print("[DEBUG] Could not get detailed diagnostics")
+            
         # Use the initial face swap result or original image as fallback
         result_cv = input_for_ace
         cv2.imwrite(os.path.join(debug_dir, "3_ace_failed.png"), result_cv)
