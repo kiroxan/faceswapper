@@ -174,3 +174,5 @@ cython_debug/
 .pypirc
 test/ref.png
 /node_modules
+setup_env.sh
+setup_env.ps1

@@ -1,6 +1,13 @@
 import os
 import cv2
 import numpy as np
+import uuid
+import boto3
+import json
+import time
+from datetime import datetime
+from threading import Thread
+from typing import Dict, Optional, List
 from insightface.app import FaceAnalysis
 from insightface.model_zoo import get_model
 from gfpgan import GFPGANer
@@ -25,6 +32,19 @@ except Exception as e:
     print(f"[WARN] GFPGAN initialization failed: {e}")
     gfpganer = None
 
+# --- S3 Configuration ---
+# Initialize S3 client
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.environ.get('AWS_REGION', 'us-east-1')
+)
+S3_BUCKET = os.environ.get('S3_BUCKET')
+
+# --- Task Management ---
+# In-memory storage for task status
+tasks: Dict[str, Dict] = {}
 
 # --- Main Faceswap Function ---
 def run_faceswap(main_path, ref_path, output_path, mask_path=None, prompt="", negative_prompt=""):
@@ -153,16 +173,58 @@ def run_faceswap(main_path, ref_path, output_path, mask_path=None, prompt="", ne
     cv2.imwrite(output_path, result)
     return output_path
 
+# --- Async Task Processing Function ---
+def process_swap_task(task_id: str, main_path: str, ref_path: str, output_path: str, 
+                     mask_path: Optional[str] = None, prompt: str = "", negative_prompt: str = ""):
+    """Process a face swap task asynchronously and upload result to S3"""
+    try:
+        # Update task status to processing
+        tasks[task_id]['status'] = 'processing'
+        tasks[task_id]['start_time'] = datetime.now().isoformat()
+        
+        # Run the faceswap
+        result_path = run_faceswap(main_path, ref_path, output_path, mask_path, prompt, negative_prompt)
+        
+        if result_path and os.path.exists(result_path):
+            # Upload result to S3
+            s3_key = f"results/{task_id}/{os.path.basename(result_path)}"
+            s3_client.upload_file(result_path, S3_BUCKET, s3_key)
+            
+            # Generate presigned URL for the result (valid for 1 hour)
+            presigned_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': S3_BUCKET, 'Key': s3_key},
+                ExpiresIn=3600
+            )
+            
+            # Update task info
+            tasks[task_id]['status'] = 'completed'
+            tasks[task_id]['result_url'] = presigned_url
+            tasks[task_id]['s3_key'] = s3_key
+            tasks[task_id]['end_time'] = datetime.now().isoformat()
+        else:
+            # Handle failure
+            tasks[task_id]['status'] = 'failed'
+            tasks[task_id]['error'] = 'Face swap processing failed'
+            tasks[task_id]['end_time'] = datetime.now().isoformat()
+    
+    except Exception as e:
+        # Handle exceptions
+        print(f"[ERROR] Task {task_id} failed: {str(e)}")
+        tasks[task_id]['status'] = 'failed'
+        tasks[task_id]['error'] = str(e)
+        tasks[task_id]['end_time'] = datetime.now().isoformat()
 
 # --- FastAPI Setup ---
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse, JSONResponse
 import shutil
 
 app = FastAPI()
 UPLOAD_DIR = "./input"
-OUTPUT_PATH = "./output/result.png"
+OUTPUT_DIR = "./output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 @app.post("/swap")
 async def swap_faces(
@@ -188,9 +250,134 @@ async def swap_faces(
             shutil.copyfileobj(mask.file, f)
 
     # Run the faceswap pipeline
-    result_path = run_faceswap(main_path, ref_path, OUTPUT_PATH, mask_path, prompt, negative_prompt)
+    result_path = run_faceswap(main_path, ref_path, OUTPUT_DIR + "/result.png", mask_path, prompt, negative_prompt)
     
     if result_path and os.path.exists(result_path):
         return FileResponse(result_path, media_type="image/png")
     else:
         return {"error": "Face swap failed"}
+
+@app.post("/swap/async")
+async def async_swap_faces(
+    background_tasks: BackgroundTasks,
+    main: UploadFile = File(...),
+    ref: UploadFile = File(...),
+    mask: UploadFile = File(None),
+    prompt: str = Form(""),
+    negative_prompt: str = Form(""),
+    prompt_strength: float = Form(0.25)
+):
+    """Start an asynchronous face swap task and return a task ID"""
+    # Generate a unique task ID
+    task_id = str(uuid.uuid4())
+    
+    # Create task-specific directories
+    task_input_dir = os.path.join(UPLOAD_DIR, task_id)
+    task_output_dir = os.path.join(OUTPUT_DIR, task_id)
+    os.makedirs(task_input_dir, exist_ok=True)
+    os.makedirs(task_output_dir, exist_ok=True)
+    
+    # Define file paths
+    main_path = os.path.join(task_input_dir, "main.png")
+    ref_path = os.path.join(task_input_dir, "ref.png")
+    mask_path = os.path.join(task_input_dir, "mask.png") if mask else None
+    output_path = os.path.join(task_output_dir, "result.png")
+    
+    # Save the uploaded files
+    for file, dest in [(main, main_path), (ref, ref_path)]:
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+    if mask:
+        with open(mask_path, "wb") as f:
+            shutil.copyfileobj(mask.file, f)
+    
+    # Initialize task info
+    tasks[task_id] = {
+        'id': task_id,
+        'status': 'queued',
+        'created': datetime.now().isoformat(),
+        'input_paths': {
+            'main': main_path,
+            'ref': ref_path,
+            'mask': mask_path
+        },
+        'output_path': output_path,
+        'parameters': {
+            'prompt': prompt,
+            'negative_prompt': negative_prompt,
+            'prompt_strength': prompt_strength
+        }
+    }
+    
+    # Start processing in the background
+    # Use a Thread for simplicity - for production use consider a proper task queue like Celery
+    task_thread = Thread(
+        target=process_swap_task,
+        args=(task_id, main_path, ref_path, output_path, mask_path, prompt, negative_prompt)
+    )
+    task_thread.start()
+    
+    return JSONResponse({
+        "task_id": task_id,
+        "status": "queued",
+        "message": "Face swap task has been queued"
+    })
+
+@app.get("/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    """Get the status of an async face swap task"""
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    task_info = tasks[task_id].copy()
+    
+    # If the task is completed but the URL has expired, generate a new one
+    if task_info.get('status') == 'completed' and 's3_key' in task_info:
+        # Generate a new presigned URL valid for 1 hour
+        try:
+            presigned_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': S3_BUCKET, 'Key': task_info['s3_key']},
+                ExpiresIn=3600
+            )
+            task_info['result_url'] = presigned_url
+        except Exception as e:
+            print(f"[WARN] Failed to generate presigned URL: {str(e)}")
+    
+    # Don't return internal file paths
+    if 'input_paths' in task_info:
+        del task_info['input_paths']
+    if 'output_path' in task_info:
+        del task_info['output_path']
+    
+    return JSONResponse(task_info)
+
+@app.get("/tasks")
+async def list_tasks(limit: int = 10, status: Optional[str] = None):
+    """List recent tasks with optional status filter"""
+    filtered_tasks = []
+    
+    for task_id, task_info in sorted(
+        tasks.items(), 
+        key=lambda x: x[1].get('created', ''), 
+        reverse=True
+    ):
+        # Apply status filter if provided
+        if status and task_info.get('status') != status:
+            continue
+            
+        # Create a copy without internal file paths
+        task_copy = task_info.copy()
+        if 'input_paths' in task_copy:
+            del task_copy['input_paths']
+        if 'output_path' in task_copy:
+            del task_copy['output_path']
+        
+        filtered_tasks.append(task_copy)
+        
+        # Apply limit
+        if len(filtered_tasks) >= limit:
+            break
+    
+    return JSONResponse({"tasks": filtered_tasks})
