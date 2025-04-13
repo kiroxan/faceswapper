@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import torch
-from diffusers import StableDiffusionImg2ImgPipeline, DDIMScheduler
+from diffusers import StableDiffusionImg2ImgPipeline, DDIMScheduler, LoraLoaderMixin
 from safetensors.torch import load_file
 from insightface.app import FaceAnalysis
 from insightface.model_zoo import get_model
@@ -33,6 +33,16 @@ except Exception as e:
 ACE_LORA_PATH = "../models/ace_plus/comfyui_portrait_lora64.safetensors"
 DEFAULT_MODEL_PATH = "runwayml/stable-diffusion-v1-5"
 
+# Check safetensors and diffusers versions
+try:
+    import pkg_resources
+    safetensors_version = pkg_resources.get_distribution("safetensors").version
+    diffusers_version = pkg_resources.get_distribution("diffusers").version
+    print(f"[INFO] Using safetensors version: {safetensors_version}")
+    print(f"[INFO] Using diffusers version: {diffusers_version}")
+except Exception as e:
+    print(f"[WARN] Could not determine package versions: {e}")
+
 # Lazily initialize StableDiffusion pipeline on first use
 sd_pipeline = None
 
@@ -57,13 +67,38 @@ def get_sd_pipeline():
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         )
         
-        # Load LoRA weights
-        lora_state_dict = load_file(ACE_LORA_PATH)
-        sd_pipeline.load_lora_weights(lora_state_dict)
+        # Apply LoRA weights using path to model
+        try:
+            # First approach: load from local path
+            print(f"[INFO] Loading ACE_Plus LoRA from {ACE_LORA_PATH}")
+            from diffusers.models.attention_processor import LoRAAttnProcessor
+            
+            # Create a new folder for the LoRA model if it doesn't exist
+            lora_dir = os.path.dirname(ACE_LORA_PATH)
+            
+            # Instead of direct loading, register the adapter and set it as active
+            sd_pipeline.load_lora_weights(lora_dir, weight_name=os.path.basename(ACE_LORA_PATH))
+            sd_pipeline.set_adapters(["default"], adapter_weights=[1.0])
+            
+        except Exception as e:
+            print(f"[WARN] Failed to load LoRA weights from file: {e}")
+            print("[INFO] Trying to load from Hugging Face model ID...")
+            
+            try:
+                # Alternative approach: load from Hugging Face model ID
+                print("[INFO] Loading ACE_Plus LoRA from Hugging Face...")
+                sd_pipeline.load_lora_weights("ali-vilab/ACE_Plus", weight_name="portrait/comfyui_portrait_lora64.safetensors")
+                sd_pipeline.set_adapters(["default"], adapter_weights=[1.0])
+            except Exception as e2:
+                print(f"[ERROR] Failed to load LoRA weights from Hugging Face: {e2}")
+                return None
         
         # Move to GPU if available
         if torch.cuda.is_available():
             sd_pipeline = sd_pipeline.to("cuda")
+            print("[INFO] Using GPU for inference")
+        else:
+            print("[WARN] GPU not available, using CPU (this will be very slow)")
     
     return sd_pipeline
 
@@ -222,22 +257,29 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
     
     # Run ACE_Plus inference
     print("[INFO] Running ACE_Plus portrait enhancement...")
-    with torch.inference_mode():
-        result = pipeline(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            image=input_pil,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            strength=lora_strength,
-        ).images[0]
-    
-    # Save intermediate result
-    result.save(os.path.join(debug_dir, "3_ace_enhanced.png"))
-    
-    # Convert back to OpenCV format
-    result_cv = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+    try:
+        with torch.inference_mode():
+            result = pipeline(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                image=input_pil,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                strength=lora_strength,
+            ).images[0]
+        
+        # Save intermediate result
+        result.save(os.path.join(debug_dir, "3_ace_enhanced.png"))
+        
+        # Convert back to OpenCV format
+        result_cv = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        print(f"[ERROR] ACE_Plus enhancement failed: {e}")
+        print("[INFO] Falling back to the initial face swap result")
+        # Use the initial face swap result or original image as fallback
+        result_cv = input_for_ace
+        cv2.imwrite(os.path.join(debug_dir, "3_ace_failed.png"), result_cv)
     
     # Apply GFPGAN for optional face enhancement
     if gfpganer:
