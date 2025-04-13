@@ -31,7 +31,7 @@ except Exception as e:
 
 # Load ACE_Plus LoRA model paths
 ACE_LORA_PATH = "../models/ace_plus/comfyui_portrait_lora64.safetensors"
-ACE_FFT_LORA_PATH = "../models/ace_plus/ace_plus_fft.safetensors"
+ACE_FFT_LORA_PATH = "../models/ace_plus_fft.safetensors"
 DEFAULT_MODEL_PATH = "runwayml/stable-diffusion-v1-5"
 
 # Check safetensors and diffusers versions
