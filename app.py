@@ -13,6 +13,9 @@ from insightface.model_zoo import get_model
 from gfpgan import GFPGANer
 from pathlib import Path
 
+# Import the ACE_Plus face swap function
+from run_faceswap_ace import run_faceswap_ace, download_ace_plus_model
+
 # --- Initialize Reusable Components ---
 face_detector = FaceAnalysis(name="buffalo_l", root="../models")
 face_detector.prepare(ctx_id=0)  # Use GPU if available, else CPU fallback
@@ -175,15 +178,28 @@ def run_faceswap(main_path, ref_path, output_path, mask_path=None, prompt="", ne
 
 # --- Async Task Processing Function ---
 def process_swap_task(task_id: str, main_path: str, ref_path: str, output_path: str, 
-                     mask_path: Optional[str] = None, prompt: str = "", negative_prompt: str = ""):
+                     mask_path: Optional[str] = None, prompt: str = "", negative_prompt: str = "",
+                     use_ace: bool = False, lora_strength: float = 0.7, guidance_scale: float = 7.5,
+                     num_inference_steps: int = 30, seed: Optional[int] = None):
     """Process a face swap task asynchronously and upload result to S3"""
     try:
         # Update task status to processing
         tasks[task_id]['status'] = 'processing'
         tasks[task_id]['start_time'] = datetime.now().isoformat()
         
-        # Run the faceswap
-        result_path = run_faceswap(main_path, ref_path, output_path, mask_path, prompt, negative_prompt)
+        # Run the faceswap with appropriate method
+        if use_ace:
+            # Use ACE_Plus portrait enhancement
+            print(f"[INFO] Using ACE_Plus portrait model for task {task_id}")
+            result_path = run_faceswap_ace(
+                main_path, ref_path, output_path, mask_path, 
+                prompt, negative_prompt, lora_strength,
+                guidance_scale, num_inference_steps, seed
+            )
+        else:
+            # Use standard InsightFace model
+            print(f"[INFO] Using standard InsightFace model for task {task_id}")
+            result_path = run_faceswap(main_path, ref_path, output_path, mask_path, prompt, negative_prompt)
         
         if result_path and os.path.exists(result_path):
             # Upload result to S3
@@ -233,9 +249,10 @@ async def swap_faces(
     mask: UploadFile = File(None),
     prompt: str = Form(""),
     negative_prompt: str = Form(""),
-    prompt_strength: float = Form(0.25)  # Default prompt strength of 0.25 (lower = more preservation)
+    prompt_strength: float = Form(0.25),  # Default prompt strength of 0.25 (lower = more preservation)
+    use_ace: bool = Form(False)  # Whether to use ACE_Plus portrait model
 ):
-    print(f"[INFO] Received request with prompt: '{prompt}', strength: {prompt_strength}")
+    print(f"[INFO] Received request with prompt: '{prompt}', strength: {prompt_strength}, use_ace: {use_ace}")
     main_path = os.path.join(UPLOAD_DIR, "main.png")
     ref_path = os.path.join(UPLOAD_DIR, "ref.png")
     mask_path = os.path.join(UPLOAD_DIR, "mask.png") if mask else None
@@ -249,8 +266,23 @@ async def swap_faces(
         with open(mask_path, "wb") as f:
             shutil.copyfileobj(mask.file, f)
 
-    # Run the faceswap pipeline
-    result_path = run_faceswap(main_path, ref_path, OUTPUT_DIR + "/result.png", mask_path, prompt, negative_prompt)
+    # Run the appropriate faceswap pipeline
+    if use_ace:
+        # Check if ACE_Plus model is available or try to download it
+        if not os.path.exists("../models/ace_plus/comfyui_portrait_lora64.safetensors"):
+            # Try downloading the model
+            download_result = download_ace_plus_model()
+            if not download_result:
+                return {"error": "ACE_Plus model not available. Please download it manually."}
+        
+        # Run ACE_Plus face swap
+        result_path = run_faceswap_ace(
+            main_path, ref_path, OUTPUT_DIR + "/result.png", mask_path, 
+            prompt, negative_prompt, lora_strength=prompt_strength
+        )
+    else:
+        # Run standard face swap
+        result_path = run_faceswap(main_path, ref_path, OUTPUT_DIR + "/result.png", mask_path, prompt, negative_prompt)
     
     if result_path and os.path.exists(result_path):
         return FileResponse(result_path, media_type="image/png")
@@ -265,7 +297,12 @@ async def async_swap_faces(
     mask: UploadFile = File(None),
     prompt: str = Form(""),
     negative_prompt: str = Form(""),
-    prompt_strength: float = Form(0.25)
+    prompt_strength: float = Form(0.25),
+    use_ace: bool = Form(False),  # Whether to use ACE_Plus portrait model
+    lora_strength: float = Form(0.7),  # ACE_Plus specific: strength of LoRA model
+    guidance_scale: float = Form(7.5),  # ACE_Plus specific: guidance scale
+    num_inference_steps: int = Form(30),  # ACE_Plus specific: number of sampling steps
+    seed: Optional[int] = Form(None)  # ACE_Plus specific: random seed
 ):
     """Start an asynchronous face swap task and return a task ID"""
     # Generate a unique task ID
@@ -306,23 +343,69 @@ async def async_swap_faces(
         'parameters': {
             'prompt': prompt,
             'negative_prompt': negative_prompt,
-            'prompt_strength': prompt_strength
+            'prompt_strength': prompt_strength,
+            'use_ace': use_ace,
+            'lora_strength': lora_strength,
+            'guidance_scale': guidance_scale,
+            'num_inference_steps': num_inference_steps,
+            'seed': seed
         }
     }
+    
+    # If using ACE_Plus, check if model exists or try to download it
+    if use_ace and not os.path.exists("../models/ace_plus/comfyui_portrait_lora64.safetensors"):
+        # Start a background task to download the model
+        Thread(target=download_ace_plus_model).start()
+        # Note: We'll let the swap process handle the case if download fails
     
     # Start processing in the background
     # Use a Thread for simplicity - for production use consider a proper task queue like Celery
     task_thread = Thread(
         target=process_swap_task,
-        args=(task_id, main_path, ref_path, output_path, mask_path, prompt, negative_prompt)
+        args=(
+            task_id, main_path, ref_path, output_path, mask_path, 
+            prompt, negative_prompt, use_ace, lora_strength,
+            guidance_scale, num_inference_steps, seed
+        )
     )
     task_thread.start()
     
     return JSONResponse({
         "task_id": task_id,
         "status": "queued",
-        "message": "Face swap task has been queued"
+        "message": "Face swap task has been queued",
+        "model": "ACE_Plus portrait" if use_ace else "InsightFace"
     })
+
+@app.post("/swap/ace/async")
+async def async_ace_portrait_swap(
+    background_tasks: BackgroundTasks,
+    main: UploadFile = File(...),
+    ref: UploadFile = File(...),
+    mask: UploadFile = File(None),
+    prompt: str = Form(""),
+    negative_prompt: str = Form(""),
+    lora_strength: float = Form(0.7),
+    guidance_scale: float = Form(7.5),
+    num_inference_steps: int = Form(30),
+    seed: Optional[int] = Form(None)
+):
+    """Dedicated endpoint for ACE_Plus portrait model face swap"""
+    # This is just a convenience wrapper around the async_swap_faces endpoint
+    return await async_swap_faces(
+        background_tasks=background_tasks,
+        main=main,
+        ref=ref,
+        mask=mask,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        prompt_strength=lora_strength,  # Use lora_strength as prompt_strength
+        use_ace=True,
+        lora_strength=lora_strength,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        seed=seed
+    )
 
 @app.get("/tasks/{task_id}")
 async def get_task_status(task_id: str):
