@@ -193,7 +193,7 @@ def process_swap_task(task_id: str, main_path: str, ref_path: str, output_path: 
             print(f"[INFO] Using {model_name} model for task {task_id}")
             
             # Check if required model exists
-            lora_path = "../models/ace_plus/ace_plus_fft.safetensors" if use_fft else "../models/ace_plus/comfyui_portrait_lora64.safetensors"
+            lora_path = "../models/ace_plus_fft.safetensors" if use_fft else "../models/comfyui_portrait_lora64.safetensors"
             if not os.path.exists(lora_path):
                 # Try downloading the model
                 download_result = download_ace_plus_model(use_fft=use_fft)
@@ -369,7 +369,7 @@ async def async_swap_faces(
     
     # If using ACE_Plus, check if model exists or try to download it
     if use_ace:
-        lora_path = "../models/ace_plus/ace_plus_fft.safetensors" if use_fft else "../models/ace_plus/comfyui_portrait_lora64.safetensors"
+        lora_path = "../models/ace_plus_fft.safetensors" if use_fft else "../models/comfyui_portrait_lora64.safetensors"
         if not os.path.exists(lora_path):
             # Start a background task to download the model
             Thread(target=download_ace_plus_model, args=(use_fft,)).start()
