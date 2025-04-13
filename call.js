@@ -4,17 +4,14 @@ const fs = require('fs');
 
 async function runSwap() {
   const form = new FormData();
-  form.append('source', fs.createReadStream('./test/face.png'));  // Face to use
-  form.append('target', fs.createReadStream('./test/target.png')); // Where to place the face
+  form.append('source', fs.createReadStream('./test/ref.png'));  // Face to use
+  form.append('target', fs.createReadStream('./test/main.png')); // Where to place the face
   
-  // Optional: include mask if available
-  if (fs.existsSync('./test/mask.png')) {
-    form.append('mask', fs.createReadStream('./test/mask.png'));
-  }
+
   
   try {
     const response = await axios.post(
-      'http://localhost:7860/swap',
+      'https://v1yfznzb7lkce6-7860.proxy.runpod.net/swap',
       form,
       {
         headers: form.getHeaders(),
@@ -22,7 +19,7 @@ async function runSwap() {
       }
     );
     
-    fs.writeFileSync('./result.png', response.data);
+    fs.writeFileSync('./output/result.png', response.data);
     console.log('Face swap complete. Saved as result.png');
   } catch (error) {
     console.error('Error during face swap:', error);
