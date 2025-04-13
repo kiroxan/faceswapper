@@ -77,7 +77,7 @@ def get_sd_pipeline(simple_mode=False, use_fft=False):
         sd_pipeline = StableDiffusionImg2ImgPipeline.from_pretrained(
             DEFAULT_MODEL_PATH,
             scheduler=scheduler,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=torch.float32,
         )
         
         # Skip LoRA loading if in simple mode or if we've already failed
@@ -400,30 +400,15 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
     # Run ACE_Plus inference
     print("[INFO] Running ACE_Plus portrait enhancement...")
     try:
-        with torch.inference_mode():
-            try:
-                print("[INFO] Using pipeline parameters: guidance_scale={}, steps={}, strength={}".format(
-                    guidance_scale, num_inference_steps, lora_strength
-                ))
-                
-                # Try the standard API call first
-                result = pipeline(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    image=input_pil,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
-                    strength=lora_strength,
-                ).images[0]
-                
-            except TypeError as type_err:
-                # Check if there's a specific parameter issue
-                print(f"[WARN] Parameter error in pipeline call: {type_err}")
-                print("[INFO] Trying alternative parameter set...")
-                
-                if "got an unexpected keyword argument 'strength'" in str(type_err):
-                    # Try without strength parameter (some versions don't use it)
+        # Try with the current pipeline settings
+        try:
+            with torch.inference_mode():
+                try:
+                    print("[INFO] Using pipeline parameters: guidance_scale={}, steps={}, strength={}".format(
+                        guidance_scale, num_inference_steps, lora_strength
+                    ))
+                    
+                    # Try the standard API call first
                     result = pipeline(
                         prompt=prompt,
                         negative_prompt=negative_prompt,
@@ -431,10 +416,52 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
                         num_inference_steps=num_inference_steps,
                         guidance_scale=guidance_scale,
                         generator=generator,
+                        strength=lora_strength,
                     ).images[0]
-                else:
-                    # Let the error propagate to outer try/catch
-                    raise
+                    
+                except TypeError as type_err:
+                    # Check if there's a specific parameter issue
+                    print(f"[WARN] Parameter error in pipeline call: {type_err}")
+                    print("[INFO] Trying alternative parameter set...")
+                    
+                    if "got an unexpected keyword argument 'strength'" in str(type_err):
+                        # Try without strength parameter (some versions don't use it)
+                        result = pipeline(
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            image=input_pil,
+                            num_inference_steps=num_inference_steps,
+                            guidance_scale=guidance_scale,
+                            generator=generator,
+                        ).images[0]
+                    else:
+                        # Let the error propagate to outer try/catch
+                        raise
+                    
+        except RuntimeError as rt_err:
+            # Check for LayerNormKernelImpl error
+            error_msg = str(rt_err)
+            if "LayerNormKernelImpl" in error_msg and "Half" in error_msg:
+                print("[WARN] CUDA LayerNormKernelImpl error detected. Converting model to float32...")
+                
+                # Force the pipeline to use float32
+                pipeline.to(dtype=torch.float32)
+                
+                # Try again with float32
+                with torch.inference_mode():
+                    print("[INFO] Retrying with float32 precision...")
+                    result = pipeline(
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        image=input_pil,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        generator=generator,
+                        strength=lora_strength,
+                    ).images[0]
+            else:
+                # Some other runtime error, re-raise
+                raise
         
         # Save intermediate result
         result.save(os.path.join(debug_dir, "3_ace_enhanced.png"))

@@ -119,7 +119,7 @@ async function runAsyncSwap(options = {}) {
 const args = process.argv.slice(2);
 const options = {
   useAce: true,
-  useFft: true,
+  useFft: false,
   loraStrength: 0.7,
   prompt: '',
   negativePrompt: ''

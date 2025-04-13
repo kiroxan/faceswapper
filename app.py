@@ -1,3 +1,5 @@
+import force_float32
+
 import os
 import cv2
 import numpy as np
