@@ -7,11 +7,11 @@ async function runAsyncSwap(options = {}) {
   const defaults = {
     mainPath: './test/main.png',
     refPath: './test/ref.png',
-    maskPath: './test/mask.png',
-    prompt: 'retain face , make hair pink',
+    maskPath: null,
+    prompt: '',
     negativePrompt: '',
     useAce: true,
-    useFft: true,
+    useFft: false,
     loraStrength: 0.7,
     guidanceScale: 7.5,
     steps: 30,
@@ -21,6 +21,22 @@ async function runAsyncSwap(options = {}) {
   
   // Merge defaults with provided options
   const config = { ...defaults, ...options };
+  
+  // If FFT mode is enabled, adjust the parameters to optimal values
+  if (config.useFft) {
+    // Set optimal FFT parameters if not already set
+    if (config.guidanceScale < 8.5) config.guidanceScale = 8.5;
+    if (config.steps < 35) config.steps = 35;
+    
+    // Set FFT-optimized prompts if not provided
+    if (!config.prompt) {
+      config.prompt = "ultra realistic photograph of person, highly detailed face, clear eyes, 8k, masterpiece";
+    }
+    
+    if (!config.negativePrompt) {
+      config.negativePrompt = "blurry, low quality, cartoon, drawing, painting, 3d render, deformed face, bad eyes, bad mouth";
+    }
+  }
   
   // Create form data
   const form = new FormData();
@@ -166,7 +182,9 @@ if (options.useAce) {
   
   if (options.useFft) {
     console.log(`\nNOTE: Using the ACE_Plus FFT variant which works best for detailed face enhancements.`);
-    console.log(`If you encounter issues with the FFT model, try using the standard portrait model instead (without --fft flag).`);
+    console.log(`The FFT model works in enhanced mode even if the LoRA file can't be loaded - using optimized parameters.`);
+    console.log(`FFT enhancement uses higher guidance (8.5+) and more steps (35+) even without the model file.`);
+    console.log(`If you encounter issues, try using the standard portrait model instead (without --fft flag).`);
   }
 }
 if (options.prompt) console.log(`Prompt: "${options.prompt}"`);

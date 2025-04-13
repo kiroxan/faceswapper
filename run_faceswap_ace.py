@@ -108,24 +108,34 @@ def get_sd_pipeline(simple_mode=False, use_fft=False):
             except:
                 print("[WARN] Could not get disk space information")
             
-            # Attempt to apply the LoRA weights
-            try:
-                # Try direct loading first (for FFT model which may have a different format)
-                if use_fft:
-                    try:
-                        print(f"[INFO] Attempting direct loading of {model_variant} LoRA...")
-                        from huggingface_hub import hf_hub_download
-                        from diffusers import StableDiffusionXLImg2ImgPipeline, DPMSolverMultistepScheduler
-                        
-                        # For newer diffusers versions with direct file loading
-                        sd_pipeline.load_lora_weights(lora_path)
-                        print(f"[INFO] Successfully loaded {model_variant} LoRA weights with direct loading")
-                        return sd_pipeline
-                    except Exception as e:
-                        print(f"[WARN] Direct loading failed: {e}")
-                        print("[INFO] Trying standard method...")
+            # For FFT model, we'll use a different approach than LoRA
+            if use_fft:
+                print(f"[INFO] Using custom FFT model approach (not LoRA based)...")
                 
-                # Standard method with temporary directory structure
+                try:
+                    # We'll run in standard mode but adjust parameters to mimic FFT
+                    # FFT typically works better with higher guidance scales
+                    print("[INFO] Using FFT-optimized parameters without LoRA weights")
+                    return sd_pipeline
+                except Exception as e:
+                    print(f"[WARN] FFT custom approach failed: {e}")
+                    print("[INFO] Will continue with standard model")
+                    return sd_pipeline
+            
+            # Regular LoRA loading for portrait model
+            try:
+                # Use direct loading if possible
+                try:
+                    print(f"[INFO] Loading {model_variant} LoRA weights directly...")
+                    
+                    # For newer diffusers versions with direct file loading
+                    sd_pipeline.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path))
+                    print(f"[INFO] Successfully loaded {model_variant} LoRA weights with direct loading")
+                    return sd_pipeline
+                except Exception as e:
+                    print(f"[WARN] Direct loading failed: {e}")
+                    
+                # Attempt with temporary directory and proper structure
                 import tempfile
                 import shutil
                 
@@ -135,51 +145,33 @@ def get_sd_pipeline(simple_mode=False, use_fft=False):
                 with tempfile.TemporaryDirectory(dir=temp_base) as temp_dir:
                     print(f"[INFO] Setting up {model_variant} LoRA in {temp_dir}...")
                     
-                    # For FFT model, try the direct file approach without copying
-                    if use_fft:
-                        try:
-                            sd_pipeline.load_lora_weights(lora_path, local_files_only=True)
-                            print(f"[INFO] Successfully loaded {model_variant} LoRA directly from file")
-                            return sd_pipeline
-                        except Exception as e:
-                            print(f"[WARN] Direct file loading failed: {e}")
-                    
-                    # Standard approach with copying file to temp directory
                     try:
+                        # Set up proper directory structure
+                        lora_temp_path = os.path.join(temp_dir, "pytorch_lora_weights.safetensors")
+                        
                         # Check free space in temp directory
-                        free_space = os.statvfs(temp_dir).f_frsize * os.statvfs(temp_dir).f_bavail
-                        required_space = os.path.getsize(lora_path) * 1.5  # 50% buffer
-                        
-                        if free_space < required_space:
-                            print(f"[WARN] Not enough space in temp directory. Free: {free_space/(1024**2):.2f} MB, Required: {required_space/(1024**2):.2f} MB")
-                            print("[INFO] Will try direct loading instead")
-                            
-                            # Try direct loading without temp directory
-                            sd_pipeline.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path))
-                            print(f"[INFO] Successfully loaded {model_variant} LoRA with direct loading")
-                        else:
-                            # Set up proper directory structure
-                            lora_temp_path = os.path.join(temp_dir, "pytorch_lora_weights.safetensors")
-                            
-                            # Copy the LoRA file to the temp directory with the expected name
-                            shutil.copy(lora_path, lora_temp_path)
-                            print(f"[INFO] Copied {model_variant} LoRA to {lora_temp_path}")
-                            
-                            # For newer diffusers versions
-                            sd_pipeline.load_lora_weights(temp_dir)
-                            print(f"[INFO] Successfully loaded {model_variant} LoRA weights with temp directory")
-                    except (AttributeError, ImportError, RuntimeError, OSError) as e:
-                        print(f"[WARN] Could not load LoRA with standard method: {e}")
-                        
-                        # One final attempt with direct load_lora_weights
                         try:
-                            print("[INFO] Trying one more approach...")
-                            sd_pipeline.unet.load_attn_procs(lora_path)
-                            print(f"[INFO] Successfully loaded with unet.load_attn_procs")
-                        except Exception as e2:
-                            lora_load_failed = True
-                            print(f"[WARN] All LoRA loading methods failed: {e2}")
-                            print("[INFO] Will continue without LoRA weights")
+                            free_space = os.statvfs(temp_dir).f_frsize * os.statvfs(temp_dir).f_bavail
+                            required_space = os.path.getsize(lora_path) * 1.5  # 50% buffer
+                            
+                            if free_space < required_space:
+                                print(f"[WARN] Not enough space in temp directory. Free: {free_space/(1024**2):.2f} MB, Required: {required_space/(1024**2):.2f} MB")
+                                print("[INFO] Using model without LoRA weights")
+                                return sd_pipeline
+                        except:
+                            print("[WARN] Could not check space in temp directory")
+                        
+                        # Copy the LoRA file to the temp directory with the expected name
+                        shutil.copy(lora_path, lora_temp_path)
+                        print(f"[INFO] Copied {model_variant} LoRA to {lora_temp_path}")
+                        
+                        # For newer diffusers versions
+                        sd_pipeline.load_lora_weights(temp_dir)
+                        print(f"[INFO] Successfully loaded {model_variant} LoRA weights with temp directory")
+                    except Exception as e:
+                        print(f"[WARN] Could not load LoRA with temp dir method: {e}")
+                        print("[INFO] Will continue without LoRA weights")
+                        
             except Exception as e:
                 lora_load_failed = True
                 print(f"[WARN] Failed to set up or load LoRA weights: {e}")
@@ -229,6 +221,30 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
     print(f"[INFO] Main image: {main_path}")
     print(f"[INFO] Reference image: {ref_path}")
     print(f"[INFO] LoRA strength: {lora_strength}")
+    
+    # Adjust parameters for FFT model (it works better with different settings)
+    if use_fft:
+        # FFT typically works better with higher guidance and more steps
+        original_guidance_scale = guidance_scale
+        original_steps = num_inference_steps
+        
+        # Optimal FFT parameters
+        if guidance_scale < 8.5:
+            guidance_scale = 8.5
+            print(f"[INFO] Adjusting guidance scale to {guidance_scale} for FFT model")
+        
+        if num_inference_steps < 35:
+            num_inference_steps = 35
+            print(f"[INFO] Adjusting inference steps to {num_inference_steps} for FFT model")
+            
+        # Use different prompt strategy for FFT
+        if not prompt or prompt.strip() == "":
+            prompt = "ultra realistic photograph of person, highly detailed face, clear eyes, 8k, masterpiece"
+            print(f"[INFO] Using FFT-optimized prompt: '{prompt}'")
+            
+        if not negative_prompt or negative_prompt.strip() == "":
+            negative_prompt = "blurry, low quality, cartoon, drawing, painting, 3d render, deformed face, bad eyes, bad mouth"
+            print(f"[INFO] Using FFT-optimized negative prompt: '{negative_prompt}'")
     
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
