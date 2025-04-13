@@ -93,7 +93,7 @@ async function runAsyncSwap(options = {}) {
 // Parse command line arguments
 const args = process.argv.slice(2);
 const options = {
-  useAce: false,
+  useAce: true,
   loraStrength: 0.7,
   prompt: '',
   negativePrompt: ''

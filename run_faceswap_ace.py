@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import torch
-from diffusers import StableDiffusionPipeline, DDIMScheduler
+from diffusers import StableDiffusionImg2ImgPipeline, DDIMScheduler
 from safetensors.torch import load_file
 from insightface.app import FaceAnalysis
 from insightface.model_zoo import get_model
@@ -37,11 +37,11 @@ DEFAULT_MODEL_PATH = "runwayml/stable-diffusion-v1-5"
 sd_pipeline = None
 
 def get_sd_pipeline():
-    """Initialize and return the Stable Diffusion pipeline with ACE_Plus LoRA"""
+    """Initialize and return the Stable Diffusion Img2Img pipeline with ACE_Plus LoRA"""
     global sd_pipeline
     
     if sd_pipeline is None:
-        print("[INFO] Loading Stable Diffusion pipeline and ACE_Plus LoRA model...")
+        print("[INFO] Loading Stable Diffusion Img2Img pipeline and ACE_Plus LoRA model...")
         
         # Check if LoRA file exists
         if not os.path.exists(ACE_LORA_PATH):
@@ -49,9 +49,9 @@ def get_sd_pipeline():
             print("[INFO] Please download it from https://huggingface.co/ali-vilab/ACE_Plus/tree/main/portrait")
             return None
             
-        # Create Stable Diffusion pipeline
+        # Create Stable Diffusion Img2Img pipeline
         scheduler = DDIMScheduler.from_pretrained(DEFAULT_MODEL_PATH, subfolder="scheduler")
-        sd_pipeline = StableDiffusionPipeline.from_pretrained(
+        sd_pipeline = StableDiffusionImg2ImgPipeline.from_pretrained(
             DEFAULT_MODEL_PATH,
             scheduler=scheduler,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
