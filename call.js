@@ -8,9 +8,10 @@ async function runAsyncSwap(options = {}) {
     mainPath: './test/main.png',
     refPath: './test/ref.png',
     maskPath: './test/mask.png',
-    prompt: '',
+    prompt: 'retain face , make hair pink',
     negativePrompt: '',
     useAce: true,
+    useFft: true,
     loraStrength: 0.7,
     guidanceScale: 7.5,
     steps: 30,
@@ -37,6 +38,7 @@ async function runAsyncSwap(options = {}) {
   
   // Add ACE_Plus specific parameters
   form.append('use_ace', config.useAce.toString());
+  form.append('use_fft', config.useFft.toString());
   
   if (config.useAce) {
     form.append('lora_strength', config.loraStrength.toString());
@@ -48,9 +50,16 @@ async function runAsyncSwap(options = {}) {
   }
   
   // Determine endpoint - use specialized endpoint if ACE
-  const endpoint = config.useAce 
-    ? `${config.apiUrl}/swap/ace/async` 
-    : `${config.apiUrl}/swap/async`;
+  let endpoint;
+  if (config.useAce) {
+    if (config.useFft) {
+      endpoint = `${config.apiUrl}/swap/ace/fft/async`;
+    } else {
+      endpoint = `${config.apiUrl}/swap/ace/async`;
+    }
+  } else {
+    endpoint = `${config.apiUrl}/swap/async`;
+  }
   
   try {
     // Submit the async task
@@ -94,6 +103,7 @@ async function runAsyncSwap(options = {}) {
 const args = process.argv.slice(2);
 const options = {
   useAce: true,
+  useFft: true,
   loraStrength: 0.7,
   prompt: '',
   negativePrompt: ''
@@ -105,6 +115,9 @@ for (let i = 0; i < args.length; i++) {
   
   if (arg === '--ace' || arg === '--use-ace') {
     options.useAce = true;
+  } else if (arg === '--fft') {
+    options.useFft = true;
+    options.useAce = true; // FFT requires ACE to be enabled
   } else if (arg === '--strength' && i + 1 < args.length) {
     options.loraStrength = parseFloat(args[++i]);
   } else if (arg === '--guidance' && i + 1 < args.length) {
@@ -123,6 +136,7 @@ Usage: node call.js [options]
 
 Options:
   --ace, --use-ace     Use ACE_Plus portrait model (default: false)
+  --fft                Use ACE_Plus FFT model variant (implies --ace)
   --strength VALUE     Set LoRA strength (default: 0.7)
   --guidance VALUE     Set guidance scale (default: 7.5, ACE mode only)
   --steps VALUE        Set inference steps (default: 30, ACE mode only)
@@ -135,8 +149,14 @@ Options:
   }
 }
 
+// Determine model name
+let modelName = "Standard InsightFace";
+if (options.useAce) {
+  modelName = options.useFft ? "ACE_Plus FFT" : "ACE_Plus Portrait";
+}
+
 // Run the swap
-console.log(`Starting face swap with model: ${options.useAce ? 'ACE_Plus portrait' : 'Standard InsightFace'}`);
+console.log(`Starting face swap with model: ${modelName}`);
 if (options.useAce) {
   console.log('ACE_Plus parameters:');
   console.log(`  LoRA strength: ${options.loraStrength}`);
