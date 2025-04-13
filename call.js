@@ -4,8 +4,8 @@ const fs = require('fs');
 
 async function runSwap() {
   const form = new FormData();
-  form.append('source', fs.createReadStream('./test/ref.png'));  // Face to use
-  form.append('target', fs.createReadStream('./test/main.png')); // Where to place the face
+  form.append('ref', fs.createReadStream('./test/ref.png'));  // Face to use
+  form.append('main', fs.createReadStream('./test/main.png')); // Where to place the face
   
 
   
