@@ -163,8 +163,26 @@ if (options.useAce) {
   console.log(`  Guidance scale: ${options.guidanceScale || 7.5}`);
   console.log(`  Steps: ${options.steps || 30}`);
   if (options.seed !== undefined) console.log(`  Seed: ${options.seed}`);
+  
+  if (options.useFft) {
+    console.log(`\nNOTE: Using the ACE_Plus FFT variant which works best for detailed face enhancements.`);
+    console.log(`If you encounter issues with the FFT model, try using the standard portrait model instead (without --fft flag).`);
+  }
 }
 if (options.prompt) console.log(`Prompt: "${options.prompt}"`);
 if (options.negativePrompt) console.log(`Negative prompt: "${options.negativePrompt}"`);
+
+// Show full command used for reference
+let commandUsed = "node call.js";
+if (options.useAce) commandUsed += " --ace";
+if (options.useFft) commandUsed += " --fft";
+if (options.loraStrength !== 0.7) commandUsed += ` --strength ${options.loraStrength}`;
+if (options.guidanceScale && options.guidanceScale !== 7.5) commandUsed += ` --guidance ${options.guidanceScale}`;
+if (options.steps && options.steps !== 30) commandUsed += ` --steps ${options.steps}`;
+if (options.seed !== undefined) commandUsed += ` --seed ${options.seed}`;
+if (options.prompt) commandUsed += ` --prompt "${options.prompt}"`;
+if (options.negativePrompt) commandUsed += ` --negative "${options.negativePrompt}"`;
+
+console.log(`\nCommand used: ${commandUsed}`);
 
 runAsyncSwap(options);

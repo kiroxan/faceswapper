@@ -30,7 +30,7 @@ except Exception as e:
     gfpganer = None
 
 # Load ACE_Plus LoRA model paths
-ACE_LORA_PATH = "../models/ace_plus/comfyui_portrait_lora64.safetensors"
+ACE_LORA_PATH = "../models/comfyui_portrait_lora64.safetensors"
 ACE_FFT_LORA_PATH = "../models/ace_plus_fft.safetensors"
 DEFAULT_MODEL_PATH = "runwayml/stable-diffusion-v1-5"
 
@@ -39,8 +39,10 @@ try:
     import pkg_resources
     safetensors_version = pkg_resources.get_distribution("safetensors").version
     diffusers_version = pkg_resources.get_distribution("diffusers").version
+    transformers_version = pkg_resources.get_distribution("transformers").version
     print(f"[INFO] Using safetensors version: {safetensors_version}")
     print(f"[INFO] Using diffusers version: {diffusers_version}")
+    print(f"[INFO] Using transformers version: {transformers_version}")
 except Exception as e:
     print(f"[WARN] Could not determine package versions: {e}")
 
@@ -90,35 +92,94 @@ def get_sd_pipeline(simple_mode=False, use_fft=False):
                     print("[INFO] Falling back to standard ACE_Plus Portrait model")
                     lora_path = ACE_LORA_PATH
                     model_variant = "ACE_Plus Portrait (fallback)"
+                    use_fft = False  # Switch to portrait mode
                 else:
                     return None
             
+            # Check the size of the LoRA file
+            lora_size_mb = os.path.getsize(lora_path) / (1024 * 1024)
+            print(f"[INFO] {model_variant} LoRA file size: {lora_size_mb:.2f} MB")
+            
+            # Print disk space information
+            try:
+                import shutil
+                total, used, free = shutil.disk_usage("/")
+                print(f"[INFO] Disk space - Total: {total/(1024**3):.1f} GB, Used: {used/(1024**3):.1f} GB, Free: {free/(1024**3):.1f} GB")
+            except:
+                print("[WARN] Could not get disk space information")
+            
             # Attempt to apply the LoRA weights
             try:
-                # Create a proper diffusers-format LoRA directory structure
-                print(f"[INFO] Setting up {model_variant} LoRA folder structure...")
-                import shutil
-                import tempfile
-                
-                # Create a temporary directory with proper structure
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    lora_temp_path = os.path.join(temp_dir, "pytorch_lora_weights.safetensors")
-                    
-                    # Copy the LoRA file to the temp directory with the expected name
-                    shutil.copy(lora_path, lora_temp_path)
-                    
-                    # Try to use the diffusers built-in LoRA loading method
+                # Try direct loading first (for FFT model which may have a different format)
+                if use_fft:
                     try:
-                        print(f"[INFO] Loading {model_variant} LoRA weights from {temp_dir}...")
+                        print(f"[INFO] Attempting direct loading of {model_variant} LoRA...")
+                        from huggingface_hub import hf_hub_download
+                        from diffusers import StableDiffusionXLImg2ImgPipeline, DPMSolverMultistepScheduler
                         
-                        # For newer diffusers versions
-                        sd_pipeline.load_lora_weights(temp_dir)
-                        print(f"[INFO] Successfully loaded {model_variant} LoRA weights with diffusers method")
-                    except (AttributeError, ImportError, RuntimeError) as e:
-                        lora_load_failed = True
-                        print(f"[WARN] Could not load LoRA with standard method: {e}")
-                        print("[INFO] Will continue without LoRA weights")
+                        # For newer diffusers versions with direct file loading
+                        sd_pipeline.load_lora_weights(lora_path)
+                        print(f"[INFO] Successfully loaded {model_variant} LoRA weights with direct loading")
+                        return sd_pipeline
+                    except Exception as e:
+                        print(f"[WARN] Direct loading failed: {e}")
+                        print("[INFO] Trying standard method...")
                 
+                # Standard method with temporary directory structure
+                import tempfile
+                import shutil
+                
+                # Use a temp dir with more space if possible
+                temp_base = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
+                
+                with tempfile.TemporaryDirectory(dir=temp_base) as temp_dir:
+                    print(f"[INFO] Setting up {model_variant} LoRA in {temp_dir}...")
+                    
+                    # For FFT model, try the direct file approach without copying
+                    if use_fft:
+                        try:
+                            sd_pipeline.load_lora_weights(lora_path, local_files_only=True)
+                            print(f"[INFO] Successfully loaded {model_variant} LoRA directly from file")
+                            return sd_pipeline
+                        except Exception as e:
+                            print(f"[WARN] Direct file loading failed: {e}")
+                    
+                    # Standard approach with copying file to temp directory
+                    try:
+                        # Check free space in temp directory
+                        free_space = os.statvfs(temp_dir).f_frsize * os.statvfs(temp_dir).f_bavail
+                        required_space = os.path.getsize(lora_path) * 1.5  # 50% buffer
+                        
+                        if free_space < required_space:
+                            print(f"[WARN] Not enough space in temp directory. Free: {free_space/(1024**2):.2f} MB, Required: {required_space/(1024**2):.2f} MB")
+                            print("[INFO] Will try direct loading instead")
+                            
+                            # Try direct loading without temp directory
+                            sd_pipeline.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path))
+                            print(f"[INFO] Successfully loaded {model_variant} LoRA with direct loading")
+                        else:
+                            # Set up proper directory structure
+                            lora_temp_path = os.path.join(temp_dir, "pytorch_lora_weights.safetensors")
+                            
+                            # Copy the LoRA file to the temp directory with the expected name
+                            shutil.copy(lora_path, lora_temp_path)
+                            print(f"[INFO] Copied {model_variant} LoRA to {lora_temp_path}")
+                            
+                            # For newer diffusers versions
+                            sd_pipeline.load_lora_weights(temp_dir)
+                            print(f"[INFO] Successfully loaded {model_variant} LoRA weights with temp directory")
+                    except (AttributeError, ImportError, RuntimeError, OSError) as e:
+                        print(f"[WARN] Could not load LoRA with standard method: {e}")
+                        
+                        # One final attempt with direct load_lora_weights
+                        try:
+                            print("[INFO] Trying one more approach...")
+                            sd_pipeline.unet.load_attn_procs(lora_path)
+                            print(f"[INFO] Successfully loaded with unet.load_attn_procs")
+                        except Exception as e2:
+                            lora_load_failed = True
+                            print(f"[WARN] All LoRA loading methods failed: {e2}")
+                            print("[INFO] Will continue without LoRA weights")
             except Exception as e:
                 lora_load_failed = True
                 print(f"[WARN] Failed to set up or load LoRA weights: {e}")
@@ -427,35 +488,88 @@ def download_ace_plus_model(use_fft=False):
         print(f"[INFO] {model_name} LoRA model not found. Downloading...")
         os.makedirs(os.path.dirname(lora_path), exist_ok=True)
         
+        # Check available disk space
+        try:
+            import shutil
+            total, used, free = shutil.disk_usage(os.path.dirname(lora_path))
+            print(f"[INFO] Disk space: Free {free/(1024**3):.2f} GB of {total/(1024**3):.2f} GB")
+            
+            # For FFT model, we need about 1.5 GB free
+            required_mb = 1500 if use_fft else 700
+            if free < required_mb * 1024 * 1024:
+                print(f"[ERROR] Not enough disk space. Needed: {required_mb} MB, Available: {free/(1024**3):.2f} GB")
+                return False
+        except Exception as e:
+            print(f"[WARN] Could not check disk space: {e}")
+        
         # URL for the model
         if use_fft:
-            # FFT model URL - update this with the correct URL when available
+            # FFT model URL
             model_url = "https://huggingface.co/ali-vilab/ACE_Plus/resolve/main/fft/ace_plus_fft.safetensors"
         else:
             # Portrait model URL
             model_url = "https://huggingface.co/ali-vilab/ACE_Plus/resolve/main/portrait/comfyui_portrait_lora64.safetensors"
         
-        # Stream the download with progress bar
+        print(f"[INFO] Downloading from {model_url}")
+        
+        # Stream the download with progress bar and check for space issues
         response = requests.get(model_url, stream=True)
         response.raise_for_status()
         
         total_size = int(response.headers.get('content-length', 0))
-        block_size = 1024  # 1 Kibibyte
+        print(f"[INFO] Model size: {total_size/(1024*1024):.2f} MB")
         
-        with open(lora_path, 'wb') as f, tqdm(
-                desc=f"Downloading {model_name} LoRA",
-                total=total_size,
-                unit='iB',
-                unit_scale=True,
-                unit_divisor=1024,
-        ) as bar:
-            for data in response.iter_content(block_size):
-                size = f.write(data)
-                bar.update(size)
+        # Check if we have enough space again with the actual file size
+        if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK):
+            # Try to download to a temporary location first (shared memory)
+            temp_path = f"/dev/shm/ace_plus_temp_{os.getpid()}.safetensors"
+            final_path = lora_path
+            download_path = temp_path
+            print(f"[INFO] Downloading to temporary location {temp_path} first")
+        else:
+            download_path = lora_path
         
-        print(f"[INFO] Downloaded {model_name} LoRA model to {lora_path}")
-        return True
-        
+        try:
+            block_size = 1024 * 1024  # 1 MB chunks for better progress updates
+            
+            with open(download_path, 'wb') as f, tqdm(
+                    desc=f"Downloading {model_name} LoRA",
+                    total=total_size,
+                    unit='iB',
+                    unit_scale=True,
+                    unit_divisor=1024,
+            ) as bar:
+                for data in response.iter_content(block_size):
+                    size = f.write(data)
+                    bar.update(size)
+            
+            # If we downloaded to temp location, copy to final destination
+            if download_path != lora_path:
+                print(f"[INFO] Moving model from {download_path} to {lora_path}")
+                os.makedirs(os.path.dirname(lora_path), exist_ok=True)
+                shutil.move(download_path, lora_path)
+            
+            print(f"[INFO] Downloaded {model_name} LoRA model to {lora_path}")
+            
+            # Verify file size
+            if os.path.getsize(lora_path) != total_size:
+                print(f"[WARN] Downloaded file size ({os.path.getsize(lora_path)}) doesn't match expected size ({total_size})")
+                print(f"[INFO] File may be corrupted, please download manually")
+                return False
+                
+            return True
+            
+        except OSError as e:
+            if "No space left on device" in str(e):
+                print(f"[ERROR] Ran out of disk space during download: {e}")
+                print(f"[INFO] Please free up at least {total_size/(1024*1024):.2f} MB of space and try again")
+                # Try to clean up partial download
+                if os.path.exists(download_path):
+                    os.remove(download_path)
+            else:
+                print(f"[ERROR] Failed to download {model_name} LoRA model: {e}")
+            return False
+            
     except Exception as e:
         print(f"[ERROR] Failed to download {model_name} LoRA model: {e}")
         print(f"[INFO] Please download it manually to {lora_path}")
