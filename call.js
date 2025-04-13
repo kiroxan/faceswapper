@@ -10,7 +10,7 @@ async function runAsyncSwap(options = {}) {
     maskPath: null,
     prompt: '',
     negativePrompt: '',
-    useAce: false,
+    useAce: true,
     loraStrength: 0.7,
     guidanceScale: 7.5,
     steps: 30,
