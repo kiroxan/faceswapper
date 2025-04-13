@@ -250,7 +250,7 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
     
     # Set default prompt if not provided
     if not prompt:
-        prompt = "a portrait photo of person, highly detailed face, clear eyes, perfect face"
+        prompt = ""
     
     # Set default negative prompt if not provided
     if not negative_prompt:

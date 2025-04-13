@@ -7,7 +7,7 @@ async function runAsyncSwap(options = {}) {
   const defaults = {
     mainPath: './test/main.png',
     refPath: './test/ref.png',
-    maskPath: null,
+    maskPath: './test/mask.png',
     prompt: '',
     negativePrompt: '',
     useAce: true,
