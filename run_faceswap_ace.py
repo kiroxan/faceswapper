@@ -45,20 +45,25 @@ except Exception as e:
 
 # Lazily initialize StableDiffusion pipeline on first use
 sd_pipeline = None
+# Flag to track if we've already tried and failed to load LoRA
+lora_load_failed = False
 
-def get_sd_pipeline():
-    """Initialize and return the Stable Diffusion Img2Img pipeline with ACE_Plus LoRA"""
-    global sd_pipeline
+def get_sd_pipeline(simple_mode=False):
+    """
+    Initialize and return the Stable Diffusion Img2Img pipeline
     
-    if sd_pipeline is None:
-        print("[INFO] Loading Stable Diffusion Img2Img pipeline and ACE_Plus LoRA model...")
-        
-        # Check if LoRA file exists
-        if not os.path.exists(ACE_LORA_PATH):
-            print(f"[ERROR] ACE_Plus LoRA model not found at {ACE_LORA_PATH}")
-            print("[INFO] Please download it from https://huggingface.co/ali-vilab/ACE_Plus/tree/main/portrait")
-            return None
-            
+    Args:
+        simple_mode: If True, skip LoRA loading entirely
+    """
+    global sd_pipeline, lora_load_failed
+    
+    # Return existing pipeline if already initialized
+    if sd_pipeline is not None:
+        return sd_pipeline
+    
+    print("[INFO] Loading Stable Diffusion Img2Img pipeline...")
+    
+    try:
         # Create Stable Diffusion Img2Img pipeline
         scheduler = DDIMScheduler.from_pretrained(DEFAULT_MODEL_PATH, subfolder="scheduler")
         sd_pipeline = StableDiffusionImg2ImgPipeline.from_pretrained(
@@ -67,41 +72,45 @@ def get_sd_pipeline():
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         )
         
-        # Apply LoRA weights using path to model
-        try:
-            print(f"[INFO] Loading ACE_Plus LoRA from {ACE_LORA_PATH}")
-            
-            # First try the standard approach of loading LoRA weights
-            try:
-                # Create adapter folder structure if needed
-                lora_dir = os.path.dirname(ACE_LORA_PATH)
-                adapter_name = "ace_portrait"
-                
-                # Load the LoRA weights (method depends on diffusers version)
-                sd_pipeline.load_lora_weights(
-                    lora_dir,
-                    weight_name=os.path.basename(ACE_LORA_PATH)
-                )
-                print("[INFO] Successfully loaded ACE_Plus LoRA weights")
-            except AttributeError as att_err:
-                print(f"[WARN] Standard load_lora_weights approach failed: {att_err}")
-                
-                # Alternative: Try loading from state dict directly
-                print("[INFO] Trying alternative approach with state_dict...")
-                lora_state_dict = load_file(ACE_LORA_PATH)
-                
-                # Directly apply weights if method exists
+        # Skip LoRA loading if in simple mode or if we've already failed
+        if simple_mode or lora_load_failed:
+            print("[INFO] Running in simple mode without ACE_Plus LoRA")
+        else:
+            # Check if LoRA file exists
+            if not os.path.exists(ACE_LORA_PATH):
+                print(f"[ERROR] ACE_Plus LoRA model not found at {ACE_LORA_PATH}")
+                print("[INFO] Please download it from https://huggingface.co/ali-vilab/ACE_Plus/tree/main/portrait")
+            else:
+                # Attempt to apply the LoRA weights
                 try:
-                    # This will work on older diffusers versions
-                    sd_pipeline.unet.load_attn_procs(lora_state_dict)
-                    print("[INFO] Applied LoRA weights using unet.load_attn_procs method")
+                    # Create a proper diffusers-format LoRA directory structure
+                    print("[INFO] Setting up LoRA folder structure...")
+                    import shutil
+                    import tempfile
+                    
+                    # Create a temporary directory with proper structure
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        lora_temp_path = os.path.join(temp_dir, "pytorch_lora_weights.safetensors")
+                        
+                        # Copy the LoRA file to the temp directory with the expected name
+                        shutil.copy(ACE_LORA_PATH, lora_temp_path)
+                        
+                        # Try to use the diffusers built-in LoRA loading method
+                        try:
+                            print(f"[INFO] Loading LoRA weights from {temp_dir}...")
+                            
+                            # For newer diffusers versions
+                            sd_pipeline.load_lora_weights(temp_dir)
+                            print("[INFO] Successfully loaded ACE_Plus LoRA weights with diffusers method")
+                        except (AttributeError, ImportError, RuntimeError) as e:
+                            lora_load_failed = True
+                            print(f"[WARN] Could not load LoRA with standard method: {e}")
+                            print("[INFO] Will continue without LoRA weights")
+                    
                 except Exception as e:
-                    print(f"[ERROR] Failed to load LoRA weights: {e}")
-                    print("[WARN] Will attempt to run without LoRA weights")
-            
-        except Exception as e:
-            print(f"[WARN] Failed to load LoRA weights from file: {e}")
-            print("[WARN] Will attempt to run without LoRA weights")
+                    lora_load_failed = True
+                    print(f"[WARN] Failed to set up or load LoRA weights: {e}")
+                    print("[INFO] Will continue without LoRA weights")
         
         # Move to GPU if available
         if torch.cuda.is_available():
@@ -109,8 +118,13 @@ def get_sd_pipeline():
             print("[INFO] Using GPU for inference")
         else:
             print("[WARN] GPU not available, using CPU (this will be very slow)")
-    
-    return sd_pipeline
+        
+        # Don't return None - this lets us try SD without LoRA
+        return sd_pipeline
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to load StableDiffusion pipeline: {e}")
+        return None
 
 # --- ACE_Plus Faceswap Function ---
 def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None, 
@@ -144,6 +158,13 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    # Create debug directory
+    debug_dir = "./debug"
+    os.makedirs(debug_dir, exist_ok=True)
+    
+    # Set flag to track if we need to fall back to initial swap only
+    fallback_to_initial_swap = False
+
     # Load images
     main_img = cv2.imread(main_path)
     ref_img = cv2.imread(ref_path)
@@ -157,8 +178,6 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
         return None
         
     # Save copies of input images for debugging
-    debug_dir = "./debug"
-    os.makedirs(debug_dir, exist_ok=True)
     cv2.imwrite(os.path.join(debug_dir, "input_main.png"), main_img)
     cv2.imwrite(os.path.join(debug_dir, "input_ref.png"), ref_img)
     
@@ -235,25 +254,47 @@ def run_faceswap_ace(main_path, ref_path, output_path, mask_path=None,
         # Use the original main image as input
         input_for_ace = main_img
     
+    # Try to initialize StableDiffusion with ACE_Plus LoRA
+    try:
+        # First try with LoRA
+        pipeline = get_sd_pipeline(simple_mode=False)
+        if pipeline is None:
+            print("[INFO] Trying again without LoRA...")
+            # Try again in simple mode (no LoRA)
+            pipeline = get_sd_pipeline(simple_mode=True)
+            if pipeline is None:
+                print("[ERROR] Could not initialize StableDiffusion pipeline")
+                fallback_to_initial_swap = True
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize Stable Diffusion pipeline: {e}")
+        fallback_to_initial_swap = True
+    
+    # Check if we need to fall back to just the initial swap
+    if fallback_to_initial_swap:
+        print("[INFO] Using only the initial face swap result")
+        if use_initial_face_swap:
+            # Save final output
+            print(f"[INFO] Writing result to {output_path}")
+            cv2.imwrite(output_path, input_for_ace)
+            return output_path
+        else:
+            # If no initial swap was done, just use the original image
+            print(f"[INFO] Writing original image to {output_path}")
+            cv2.imwrite(output_path, main_img)
+            return output_path
+        
     # Convert BGR to RGB for StableDiffusion
     input_for_ace_rgb = cv2.cvtColor(input_for_ace, cv2.COLOR_BGR2RGB)
     
     # Create PIL image
     input_pil = Image.fromarray(input_for_ace_rgb)
     
-    # Initialize Stable Diffusion with ACE_Plus LoRA
-    pipeline = get_sd_pipeline()
-    if pipeline is None:
-        print("[ERROR] Could not initialize StableDiffusion with ACE_Plus LoRA")
-        cv2.imwrite(output_path, input_for_ace)  # Save current result as fallback
-        return output_path
-    
-    # Set default prompt if not provided
-    if not prompt:
-        prompt = ""
+    # Set default prompt if not provided or empty
+    if not prompt or prompt.strip() == "":
+        prompt = "a portrait photo of person, highly detailed face, clear eyes, perfect face"
     
     # Set default negative prompt if not provided
-    if not negative_prompt:
+    if not negative_prompt or negative_prompt.strip() == "":
         negative_prompt = "blurry, low quality, disfigured face, bad eyes, bad nose, bad ears, bad mouth, bad teeth"
     
     print(f"[INFO] Using prompt: '{prompt}'")
